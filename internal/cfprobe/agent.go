@@ -1465,7 +1465,8 @@ func (a *Agent) sendCorrectionConfirm(cfg Config, rx, tx string) error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	a.setAgentHeaders(req)
-	client := http.Client{Timeout: 4 * time.Second}
+	// 复用带公共 DNS 兜底的共享客户端，与其余上报路径保持一致
+	client := sharedReportHTTPClient(4*time.Second, usePublicDNSResolver(cfg))
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

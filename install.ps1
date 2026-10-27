@@ -83,7 +83,8 @@ Write-Host "  asset   : $asset"
 Write-Host "  url     : $url"
 
 try {
-    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+    $ProgressPreference = 'SilentlyContinue'
+    Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 300
     if ($args.Count -eq 0) {
         & $tmp install
     } else {

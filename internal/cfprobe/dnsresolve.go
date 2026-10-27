@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -29,6 +30,8 @@ const updateDNSServerEnv = "CF_PROBE_UPDATE_DNS"
 var (
 	updatePreferV4Once sync.Once
 	updateHasIPv4      bool
+
+	updateDNSRR atomic.Uint32
 
 	sharedClientsMu sync.Mutex
 	sharedClients   = map[sharedClientKey]*http.Client{}
@@ -87,17 +90,26 @@ func updateResolverServers() []string {
 }
 
 // newUpdateResolver 返回使用内置公共 DNS 的解析器，不依赖系统 DNS。
+// 注意：对 UDP 执行 Dial/connect 并不会真正发包探测可达性，首个服务器几乎总是
+// "成功"。因此这里按轮转顺序选择起始服务器：某台 DNS 被墙导致查询超时后，
+// 解析器会重新 Dial，下一次从下一台服务器开始，从而实现真实的故障转移。
 func newUpdateResolver() *net.Resolver {
 	return &net.Resolver{
 		PreferGo: true,
 		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			servers := updateResolverServers()
+			start := int(updateDNSRR.Add(1)) % len(servers)
 			dialer := net.Dialer{Timeout: 5 * time.Second}
-			for _, server := range updateResolverServers() {
-				if conn, err := dialer.DialContext(ctx, "udp", server); err == nil {
+			var lastErr error
+			for i := range servers {
+				server := servers[(start+i)%len(servers)]
+				conn, err := dialer.DialContext(ctx, "udp", server)
+				if err == nil {
 					return conn, nil
 				}
+				lastErr = err
 			}
-			return nil, fmt.Errorf("no available DNS server")
+			return nil, fmt.Errorf("no available DNS server: %w", lastErr)
 		},
 	}
 }

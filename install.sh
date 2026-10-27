@@ -123,7 +123,7 @@ download() {
     if command -v curl >/dev/null 2>&1; then
         curl -fL --connect-timeout 10 -m 120 -o "$out" "$url"
     elif command -v wget >/dev/null 2>&1; then
-        wget -O "$out" "$url"
+        wget -T 30 -O "$out" "$url"
     else
         die "curl or wget is required for bootstrap download"
     fi
