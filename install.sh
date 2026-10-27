@@ -237,6 +237,36 @@ log "  asset   : $asset"
 log "  url     : $url"
 
 download "$url" "$tmp"
+
+# 校验二进制 sha256，防止代理劫持或下载损坏的二进制被直接以高权限执行
+checksums_url="https://github.com/$REPO/releases/$path/checksums.txt"
+if [ -n "$GITHUB_PROXY" ]; then
+    checksums_url="${GITHUB_PROXY%/}/$checksums_url"
+fi
+checksums_file="${tmp}.checksums"
+if ! download "$checksums_url" "$checksums_file"; then
+    die "failed to download checksums.txt; refusing to run unverified binary"
+fi
+# checksums.txt 中资产名带 dist/ 前缀（如 dist/cf-probe-linux-amd64），按文件名后缀匹配
+expected="$(grep -E "[/[:space:]]${asset}\$" "$checksums_file" | head -n1 | awk '{print $1}')"
+rm -f "$checksums_file"
+if [ -z "$expected" ]; then
+    die "checksum for $asset not found in checksums.txt"
+fi
+actual=""
+if command -v sha256sum >/dev/null 2>&1; then
+    actual="$(sha256sum "$tmp" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+    actual="$(shasum -a 256 "$tmp" | awk '{print $1}')"
+elif command -v openssl >/dev/null 2>&1; then
+    actual="$(openssl dgst -sha256 -r "$tmp" | awk '{print $1}')"
+fi
+if [ -z "$actual" ]; then
+    log "[WARN] no sha256 tool found, skipping integrity check"
+elif [ "$actual" != "$expected" ]; then
+    die "checksum mismatch for $asset: expected $expected, got $actual"
+fi
+
 chmod +x "$tmp"
 
 status=126

@@ -85,6 +85,35 @@ Write-Host "  url     : $url"
 try {
     $ProgressPreference = 'SilentlyContinue'
     Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing -TimeoutSec 300
+
+    # 校验二进制 sha256，防止代理劫持或下载损坏的二进制被直接以管理员权限执行
+    $checksumsUrl = "https://github.com/$Repo/releases/$path/checksums.txt"
+    if ($GitHubProxy) {
+        $checksumsUrl = $GitHubProxy.TrimEnd("/") + "/" + $checksumsUrl
+    }
+    $checksumsFile = Join-Path $env:TEMP "cf-probe-checksums-$PID.txt"
+    Invoke-WebRequest -Uri $checksumsUrl -OutFile $checksumsFile -UseBasicParsing -TimeoutSec 120
+    # checksums.txt 中资产名带 dist/ 前缀（如 dist/cf-probe-windows-amd64.exe），按文件名后缀匹配
+    $expected = $null
+    foreach ($line in Get-Content $checksumsFile) {
+        $parts = $line -split '\s+', 2
+        if ($parts.Count -eq 2) {
+            $name = $parts[1].Trim().TrimStart("/")
+            if ($name -eq $asset -or $name.EndsWith("/$asset")) {
+                $expected = $parts[0].Trim().ToLowerInvariant()
+                break
+            }
+        }
+    }
+    Remove-Item $checksumsFile -ErrorAction SilentlyContinue
+    if (-not $expected) {
+        throw "checksum for $asset not found in checksums.txt"
+    }
+    $actual = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLowerInvariant()
+    if ($actual -ne $expected) {
+        throw "checksum mismatch for ${asset}: expected $expected, got $actual"
+    }
+
     if ($args.Count -eq 0) {
         & $tmp install
     } else {
