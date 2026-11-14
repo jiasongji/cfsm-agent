@@ -134,7 +134,7 @@ run_payload() {
     shift
     case "${cmd:-${1:-install}}" in
         uninstall|remove|delete|purge)
-            "$bin" "$cmd"
+            "$bin" "$@"
             return
             ;;
     esac
@@ -220,7 +220,7 @@ else
     path="download/$INSTALL_VERSION"
 fi
 url="https://github.com/$REPO/releases/$path/$asset"
-if [ -n "$GITHUB_PROXY" ]; then
+if [ -n "$GITHUB_PROXY" ] && [ "${url#"${GITHUB_PROXY%/}/"}" = "$url" ]; then
     url="${GITHUB_PROXY%/}/$url"
 fi
 

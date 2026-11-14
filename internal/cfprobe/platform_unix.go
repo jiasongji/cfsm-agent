@@ -19,33 +19,47 @@ import (
 )
 
 func defaultPaths() Paths {
+	return pathsForInstance("")
+}
+
+func pathsForInstance(instance string) Paths {
 	if !isRootUser() {
-		return currentUserPaths()
+		return currentUserPathsForInstance(instance)
 	}
-	return systemDefaultPaths()
+	return systemDefaultPathsForInstance(instance)
 }
 
 func systemDefaultPaths() Paths {
-	serviceName := serviceNameDefault
+	return systemDefaultPathsForInstance("")
+}
+
+func systemDefaultPathsForInstance(instance string) Paths {
+	serviceName := instanceServiceName(instance)
 	installDir := "/usr/local/bin"
 	if isOpenWrt() {
 		installDir = "/usr/bin"
 	}
-	configDir := "/etc/config/cf-probe"
+	configDir := filepath.Join("/etc/config", serviceName)
 	pidFile := filepath.Join("/run", serviceName+".pid")
 	logFile := filepath.Join("/var/log", serviceName+".log")
 	launchdUserFile := filepath.Join(userHomeDir(), "Library", "LaunchAgents", "com.cfsm."+serviceName+".plist")
+	oldTrafficFile := "/var/lib/cf-probe/traffic.dat"
+	if instance != "" {
+		// 旧版流量文件属于默认实例，命名实例不能把它搬走。
+		oldTrafficFile = ""
+	}
 	if runtime.GOOS == "darwin" {
-		configDir = "/usr/local/etc/cf-probe"
+		configDir = filepath.Join("/usr/local/etc", serviceName)
 		launchdUserFile = ""
 	}
 	return Paths{
+		Instance:        instance,
 		ServiceName:     serviceName,
 		BinaryFile:      filepath.Join(installDir, serviceName),
 		ConfigDir:       configDir,
 		ConfigFile:      filepath.Join(configDir, "config.conf"),
 		TrafficFile:     filepath.Join(configDir, "traffic.dat"),
-		OldTrafficFile:  "/var/lib/cf-probe/traffic.dat",
+		OldTrafficFile:  oldTrafficFile,
 		PIDFile:         pidFile,
 		LogFile:         logFile,
 		ServiceFile:     filepath.Join("/etc/systemd/system", serviceName+".service"),
@@ -60,20 +74,25 @@ func systemDefaultPaths() Paths {
 	}
 }
 
-func currentUserPaths() Paths {
+func currentUserPathsForInstance(instance string) Paths {
 	name, home, uid := currentAccount()
-	return userPaths(name, uid, home)
+	return userPathsForInstance(instance, name, uid, home)
 }
 
 func userPaths(name string, uid int, home string) Paths {
-	serviceName := serviceNameDefault
+	return userPathsForInstance("", name, uid, home)
+}
+
+func userPathsForInstance(instance, name string, uid int, home string) Paths {
+	serviceName := instanceServiceName(instance)
 	if home == "" {
 		home = userHomeDir()
 	}
-	configDir := filepath.Join(home, ".cf-probe")
+	configDir := filepath.Join(home, "."+serviceName)
 	return Paths{
+		Instance:        instance,
 		ServiceName:     serviceName,
-		BinaryFile:      filepath.Join(configDir, "bin", serviceName),
+		BinaryFile:      filepath.Join(configDir, "bin", serviceNameDefault),
 		ConfigDir:       configDir,
 		ConfigFile:      filepath.Join(configDir, "config.conf"),
 		TrafficFile:     filepath.Join(configDir, "traffic.dat"),
@@ -93,11 +112,15 @@ func userPaths(name string, uid int, home string) Paths {
 }
 
 func darwinUserPaths(home string) Paths {
+	return darwinUserPathsForInstance("", home)
+}
+
+func darwinUserPathsForInstance(instance, home string) Paths {
 	if home == "" {
 		home = userHomeDir()
 	}
 	uid := sudoUserUID(home)
-	return userPaths(usernameForUID(uid), uid, home)
+	return userPathsForInstance(instance, usernameForUID(uid), uid, home)
 }
 
 func sudoUserHomeDir() string {
@@ -152,7 +175,7 @@ func sudoUserUID(home string) int {
 func deepUninstall(paths Paths) []string {
 	if paths.UserMode {
 		stopService(paths)
-		stopCurrentUserProbeInstances()
+		stopCurrentUserProbeInstances(paths)
 		removeService(paths)
 		removeInstalledFiles(paths)
 		return userUninstallResiduals(paths)
@@ -160,7 +183,7 @@ func deepUninstall(paths Paths) []string {
 	stopUnixAutostart(paths)
 	removeUnixAutostart(paths)
 	removeInstalledFiles(paths)
-	if runtime.GOOS == "darwin" {
+	if runtime.GOOS == "darwin" && paths.Instance == "" {
 		removeDarwinInstallVariants()
 	}
 	return unixUninstallResiduals(paths)
@@ -277,7 +300,7 @@ func darwinUninstallResiduals(paths Paths) []string {
 	if launchdLabelLoaded("system", paths.LaunchdLabel) {
 		residuals = append(residuals, "launchd:"+"/system/"+paths.LaunchdLabel)
 	}
-	if home := sudoUserHomeDir(); home != "" {
+	if home := sudoUserHomeDir(); home != "" && paths.Instance == "" {
 		userPaths := darwinUserPaths(home)
 		residuals = append(residuals, existingPaths(
 			userPaths.BinaryFile,
@@ -411,7 +434,7 @@ func requireUninstallPermission(paths Paths) error {
 	if !isRootUser() {
 		return errors.New("请使用 root 权限重新执行卸载命令")
 	}
-	if conflicts := userInstallConflicts(); len(conflicts) > 0 {
+	if conflicts := userInstallConflicts(paths.Instance); len(conflicts) > 0 {
 		return fmt.Errorf("检测到已有非 root 用户版 cf-probe 安装: %s；root 卸载只清理系统级安装，请先切换到对应用户执行卸载",
 			strings.Join(conflicts, ", "))
 	}
@@ -469,11 +492,11 @@ func enableSystemdUserLinger(name string) error {
 }
 
 func checkInstallConflicts(paths Paths) error {
-	if err := checkOtherUserProbeRunning(); err != nil {
+	if err := checkOtherUserProbeRunning(paths); err != nil {
 		return err
 	}
 	if paths.UserMode {
-		if conflicts := systemInstallConflicts(); len(conflicts) > 0 {
+		if conflicts := systemInstallConflicts(paths.Instance); len(conflicts) > 0 {
 			if runtime.GOOS == "darwin" {
 				return fmt.Errorf("检测到 macOS root/system 版 cf-probe 安装: %s；请先执行 sudo /usr/local/bin/cf-probe uninstall 清理旧版，然后不要使用 sudo，以普通用户重新安装",
 					strings.Join(conflicts, ", "))
@@ -481,53 +504,57 @@ func checkInstallConflicts(paths Paths) error {
 			return fmt.Errorf("检测到系统级/root 版 cf-probe 安装: %s；当前版本暂未实现迁移，请先使用 root 清理旧版本后再以当前用户安装",
 				strings.Join(conflicts, ", "))
 		}
-	} else if conflicts := userInstallConflicts(); len(conflicts) > 0 {
+	} else if conflicts := userInstallConflicts(paths.Instance); len(conflicts) > 0 {
 		return fmt.Errorf("检测到已有非 root 用户版 cf-probe 安装: %s；为避免重复上报，请先切换到对应用户卸载后再继续 root 安装",
 			strings.Join(conflicts, ", "))
 	}
 	return nil
 }
 
-func systemInstallConflicts() []string {
-	paths := systemDefaultPaths()
+func systemInstallConflicts(instance string) []string {
+	paths := systemDefaultPathsForInstance(instance)
 	checks := []string{
 		paths.BinaryFile,
 		filepath.Join("/usr/local/bin", paths.ServiceName),
 		filepath.Join("/usr/bin", paths.ServiceName),
 		paths.ConfigFile,
 		paths.TrafficFile,
-		paths.OldTrafficFile,
 		paths.ServiceFile,
 		filepath.Join("/etc/init.d", paths.ServiceName),
 		filepath.Join("/etc/init", paths.ServiceName+".conf"),
 		synologyServiceFile(paths),
-		legacyUnixScriptFile,
-		legacyUnixScriptFile + ".ctl",
+	}
+	if instance == "" {
+		checks = append(checks, paths.OldTrafficFile, legacyUnixScriptFile, legacyUnixScriptFile+".ctl")
 	}
 	if runtime.GOOS == "darwin" {
-		checks = append(checks, paths.LaunchdRootFile, legacyDarwinLaunchdFile)
+		checks = append(checks, paths.LaunchdRootFile)
+		if instance == "" {
+			checks = append(checks, legacyDarwinLaunchdFile)
+		}
 	}
 	conflicts := existingPaths(checks...)
 	if runtime.GOOS == "darwin" {
 		if launchdLabelLoaded("system", paths.LaunchdLabel) {
 			conflicts = append(conflicts, "launchd:/system/"+paths.LaunchdLabel)
 		}
-		if launchdLabelLoaded("system", "com.cf.probe") {
+		if instance == "" && launchdLabelLoaded("system", "com.cf.probe") {
 			conflicts = append(conflicts, "launchd:/system/com.cf.probe")
 		}
 	}
 	return uniqueStrings(conflicts)
 }
 
-func userInstallConflicts() []string {
+func userInstallConflicts(instance string) []string {
 	if runtime.GOOS != "linux" || !isRootUser() {
 		return nil
 	}
+	serviceName := instanceServiceName(instance)
 	var conflicts []string
 	for _, home := range linuxUserHomeDirs() {
-		service := filepath.Join(home, ".config", "systemd", "user", serviceNameDefault+".service")
-		binary := filepath.Join(home, ".cf-probe", "bin", serviceNameDefault)
-		config := filepath.Join(home, ".cf-probe", "config.conf")
+		service := filepath.Join(home, ".config", "systemd", "user", serviceName+".service")
+		binary := filepath.Join(home, "."+serviceName, "bin", serviceNameDefault)
+		config := filepath.Join(home, "."+serviceName, "config.conf")
 		if hits := existingPaths(service, binary, config); len(hits) > 0 {
 			conflicts = append(conflicts, home+":"+strings.Join(hits, "|"))
 		}
@@ -577,12 +604,28 @@ type runningProbeInstance struct {
 	User   string
 	Exe    string
 	Cmd    string
+	Args   []string
 	Legacy bool
 }
 
-func checkOtherUserProbeRunning() error {
+// probeInstanceNameFromCmdline 从进程参数中解析 -instance；无该参数即默认实例。
+// 只做精确 token 匹配，避免 eth1 误匹配 eth10。
+func probeInstanceMatches(inst runningProbeInstance, instance string) bool {
+	return probeInstanceNameFromCmdline(inst.Args) == instance
+}
+
+func checkOtherUserProbeRunning(paths Paths) error {
+	selfInContainer := currentProcessInContainer()
+	var containers []runningProbeInstance
 	for _, inst := range runningProbeInstances() {
 		if inst.UID == currentUID() {
+			continue
+		}
+		if !probeInstanceMatches(inst, paths.Instance) {
+			continue
+		}
+		if skipForeignProbeInstance(selfInContainer, processInContainer(inst.PID)) {
+			containers = append(containers, inst)
 			continue
 		}
 		if inst.Legacy {
@@ -592,35 +635,92 @@ func checkOtherUserProbeRunning() error {
 		return fmt.Errorf("检测到 cf-probe 已由用户 %s(uid=%d, pid=%d) 运行，命令: %s；请先停止该实例后再安装",
 			firstNonEmpty(inst.User, strconv.Itoa(inst.UID)), inst.UID, inst.PID, firstNonEmpty(inst.Cmd, inst.Exe))
 	}
+	if len(containers) > 0 {
+		printContainerProbeInstances(containers)
+	}
 	return nil
 }
 
-func stopCurrentUserProbeInstances() {
-	for _, inst := range runningProbeInstances() {
-		if inst.UID == currentUID() {
-			signalProbeInstance(inst.PID, syscall.SIGTERM)
+// stopCurrentUserProbeInstances stops the instances that belong to the same
+// installation scope as the caller. Container-hosted instances are left alone:
+// they live in their own mount namespace and are managed through Docker.
+// When the caller itself runs inside a container the previous fail-closed
+// behaviour is kept, so two installs inside one container still replace each
+// other. Named instances only stop processes of the same instance, so
+// installing one instance never kills another.
+func stopCurrentUserProbeInstances(paths Paths) {
+	selfInContainer := currentProcessInContainer()
+	killable := func() []runningProbeInstance {
+		var out []runningProbeInstance
+		for _, inst := range runningProbeInstances() {
+			if inst.UID != currentUID() {
+				continue
+			}
+			if !probeInstanceMatches(inst, paths.Instance) {
+				continue
+			}
+			if skipForeignProbeInstance(selfInContainer, processInContainer(inst.PID)) {
+				continue
+			}
+			out = append(out, inst)
 		}
+		return out
+	}
+	for _, inst := range killable() {
+		signalProbeInstance(inst.PID, syscall.SIGTERM)
 	}
 	for i := 0; i < 20; i++ {
-		if !currentUserProbeRunning() {
+		if len(killable()) == 0 {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	for _, inst := range runningProbeInstances() {
-		if inst.UID == currentUID() {
-			signalProbeInstance(inst.PID, syscall.SIGKILL)
-		}
+	for _, inst := range killable() {
+		signalProbeInstance(inst.PID, syscall.SIGKILL)
 	}
 }
 
-func currentUserProbeRunning() bool {
-	for _, inst := range runningProbeInstances() {
-		if inst.UID == currentUID() {
+func printContainerProbeInstances(instances []runningProbeInstance) {
+	const shown = 3
+	fmt.Printf("[WARN] 检测到 %d 个运行在容器内的 cf-probe 实例，本次安装将跳过它们（不会停止容器）\n", len(instances))
+	for i, inst := range instances {
+		if i == shown {
+			fmt.Printf("[WARN] 其余 %d 个容器实例已省略\n", len(instances)-shown)
+			break
+		}
+		fmt.Printf("[WARN]   pid=%d 用户=%s 命令=%s\n", inst.PID,
+			firstNonEmpty(inst.User, strconv.Itoa(inst.UID)), firstNonEmpty(inst.Cmd, inst.Exe))
+	}
+	fmt.Println("[WARN] 请确保容器实例与本机安装使用不同的 SERVER_ID，否则会出现重复上报")
+}
+
+// currentProcessInContainer reports whether the running binary itself is inside
+// a container. The marker files cover images that predate cgroup detection; the
+// Docker image drops /.cf-probe-container for exactly this purpose.
+func currentProcessInContainer() bool {
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	if processInContainer(os.Getpid()) {
+		return true
+	}
+	for _, marker := range []string{"/.dockerenv", "/run/.containerenv", "/.cf-probe-container"} {
+		if fileExists(marker) {
 			return true
 		}
 	}
 	return false
+}
+
+func processInContainer(pid int) bool {
+	if runtime.GOOS != "linux" || pid <= 0 {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "cgroup"))
+	if err != nil {
+		return false
+	}
+	return cgroupIndicatesContainer(string(data))
 }
 
 func signalProbeInstance(pid int, sig syscall.Signal) {
@@ -668,6 +768,7 @@ func probeInstanceFromProc(pid int) (runningProbeInstance, bool) {
 		User:   usernameForUID(uid),
 		Exe:    exe,
 		Cmd:    strings.Join(cmdline, " "),
+		Args:   cmdline,
 		Legacy: isLegacyShellCommand(cmdline),
 	}, true
 }
@@ -730,9 +831,9 @@ func acquireInstanceLock(paths Paths) (func(), error) {
 		data, _ := io.ReadAll(f)
 		_ = f.Close()
 		if owner := formatInstanceLockOwner(data); owner != "" {
-			return nil, fmt.Errorf("cf-probe 已在运行: %s", owner)
+			return nil, fmt.Errorf("%s 已在运行: %s", paths.ServiceName, owner)
 		}
-		return nil, errors.New("cf-probe 已在运行")
+		return nil, fmt.Errorf("%s 已在运行", paths.ServiceName)
 	}
 	if err := f.Truncate(0); err == nil {
 		_, _ = f.Seek(0, io.SeekStart)

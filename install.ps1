@@ -1,5 +1,14 @@
 ﻿$ErrorActionPreference = "Stop"
 
+# Windows Server 2012 R2 / Windows 8 ship PowerShell 4, whose default security
+# protocol is still TLS 1.0; GitHub only accepts TLS 1.2+. Newer .NET reports
+# SystemDefault (0), which already negotiates the best protocol, so TLS 1.2 is
+# only added when an explicit protocol list is configured.
+$cfSecurityProtocol = [int][Net.ServicePointManager]::SecurityProtocol
+if ($cfSecurityProtocol -ne 0) {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]($cfSecurityProtocol -bor [int][Net.SecurityProtocolType]::Tls12)
+}
+
 # Installing/uninstalling writes to C:\Program Files and registers a SYSTEM
 # scheduled task, both of which require an elevated (administrator) session.
 # Fail fast with a clear prompt instead of a raw "Access is denied" later.
@@ -63,14 +72,13 @@ $command = if ($args.Count -gt 0) { $args[0] } else { "install" }
 $payloadArgs = @($args)
 if ($command -in @("uninstall", "remove", "delete", "purge")) {
     Write-Host "[INFO] downloading temporary uninstaller"
-    $payloadArgs = @($command)
 }
 
 $arch = Get-ArchName
 $asset = "cf-probe-windows-$arch.exe"
 $path = if ($InstallVersion -eq "latest") { "latest/download" } else { "download/$InstallVersion" }
 $url = "https://github.com/$Repo/releases/$path/$asset"
-if ($GitHubProxy) {
+if ($GitHubProxy -and -not $url.StartsWith($GitHubProxy.TrimEnd("/") + "/", [System.StringComparison]::Ordinal)) {
     $url = $GitHubProxy.TrimEnd("/") + "/" + $url
 }
 
